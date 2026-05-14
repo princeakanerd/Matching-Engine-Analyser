@@ -3,10 +3,11 @@
 // Handles container instantiation, resource capping, and execution monitoring.
 
 use crate::errors::SubmissionError;
-use bollard::container::{Config, CreateContainerOptions, StartContainerOptions, WaitContainerOptions};
-use bollard::models::{Resources, HostConfig};
+use bollard::container::{Config, CreateContainerOptions, StartContainerOptions, WaitContainerOptions, InspectContainerOptions};
+use bollard::models::{HostConfig, PortBinding};
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::default::Default;
 
 /// Orchestrates the execution of a built submission image.
@@ -17,12 +18,22 @@ pub async fn run_submission_container(submission_id: &str) -> Result<(), Submiss
     let image_name = format!("iicpc_submission:{}", submission_id);
     let container_name = format!("run_{}", submission_id);
 
-    // 1. Define Resource Constraints (1 CPU, 512MB RAM)
+    // 1. Define Resource Constraints & Network Ports
+    let mut port_bindings = HashMap::new();
+    port_bindings.insert(
+        "9000/tcp".to_string(),
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: Some("0".to_string()), // Let OS assign random available port
+        }]),
+    );
+
     let host_config = HostConfig {
-        cpu_quota: Some(100000), // 100,000 microseconds per 100,000 microsecond period = 1 CPU
+        cpu_quota: Some(100000), // 1 CPU
         cpu_period: Some(100000),
         memory: Some(512 * 1024 * 1024), // 512 MB
-        auto_remove: Some(true), // Automatically delete container after exit
+        auto_remove: Some(true),
+        port_bindings: Some(port_bindings),
         ..Default::default()
     };
 
@@ -32,6 +43,7 @@ pub async fn run_submission_container(submission_id: &str) -> Result<(), Submiss
         host_config: Some(host_config),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
+        exposed_ports: Some(HashMap::from([("9000/tcp".to_string(), HashMap::new())])),
         ..Default::default()
     };
 
@@ -50,6 +62,28 @@ pub async fn run_submission_container(submission_id: &str) -> Result<(), Submiss
     docker.start_container(&container_name, None::<StartContainerOptions<String>>)
         .await
         .map_err(|e| SubmissionError::BuildError(format!("Container start failed: {}", e)))?;
+
+    // 4.5 Inspect container to get the mapped host port
+    let inspect = docker.inspect_container(&container_name, Some(InspectContainerOptions { size: false })).await
+        .map_err(|e| SubmissionError::BuildError(format!("Inspect failed: {}", e)))?;
+
+    let host_port_str = inspect.network_settings
+        .and_then(|ns| ns.ports)
+        .and_then(|ports| ports.get("9000/tcp").cloned())
+        .flatten()
+        .and_then(|bindings| bindings.into_iter().next())
+        .and_then(|binding| binding.host_port)
+        .ok_or_else(|| SubmissionError::BuildError("Failed to find mapped port for 9000/tcp".to_string()))?;
+
+    let host_port: u16 = host_port_str.parse()
+        .map_err(|e| SubmissionError::BuildError(format!("Invalid port mapping: {}", e)))?;
+
+    log::info!("[Orchestrator] Container Port 9000 mapped to Host Port {}", host_port);
+
+    // 4.6 Launch Bot Fleet in background
+    tokio::spawn(async move {
+        crate::bot_fleet::launch_bot_fleet(host_port).await;
+    });
 
     // 5. Stream and Log Output (Telemetry)
     let mut logs = docker.logs(

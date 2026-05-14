@@ -1,2 +1,2 @@
 #!/bin/bash
-echo "Starting engine..." 
+python3 dummy_engine.py

@@ -6,6 +6,7 @@ mod errors;
 mod handlers;
 mod builder;
 mod orchestrator;
+mod bot_fleet;
 
 use actix_web::{web, App, HttpServer, middleware};
 
