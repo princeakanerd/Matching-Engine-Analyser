@@ -100,13 +100,16 @@ pub async fn submit_handler(mut payload: Multipart) -> Result<HttpResponse, Subm
             file_size_bytes: total_bytes_written,
         };
 
-        // ── Trigger Step 2: Programmatic Builder ────────────────────────
+        // ── Trigger Step 2 & 3: Programmatic Builder & Orchestrator ──────
         let submission_id_str = submission_id.to_string();
         tokio::spawn(async move {
             if let Err(e) = crate::builder::build_submission_image(&submission_id_str).await {
                 log::error!("Build failed for submission {}: {}", submission_id_str, e);
             } else {
-                log::info!("Build successful for submission {}", submission_id_str);
+                log::info!("Build successful for submission {}. Starting orchestration...", submission_id_str);
+                if let Err(e) = crate::orchestrator::run_submission_container(&submission_id_str).await {
+                    log::error!("Execution failed for submission {}: {}", submission_id_str, e);
+                }
             }
         });
 
